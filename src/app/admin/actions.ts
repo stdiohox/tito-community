@@ -8,8 +8,8 @@ import { z } from "zod";
 import { requireStaffAal2 } from "@/lib/auth";
 import { env } from "@/lib/env";
 import { emailConfigured, layout, sendEmail } from "@/lib/email";
-import { alertAdminsOfPublish, notifyNewPick } from "@/lib/notify";
-import { createPlan, paystackConfigured } from "@/lib/paystack";
+import { alertAdminsOfPublish, drainAlerts, enqueuePickAlerts, enqueueUnqueuedPicks } from "@/lib/notify";
+import { describePlanOutcome, ensurePaystackPlan } from "@/lib/plans";
 import { createClient, createServiceClient } from "@/lib/supabase/server";
 
 /*
@@ -95,8 +95,13 @@ export async function createPick(_prev: FormState, formData: FormData): Promise<
   }
 
   const summary = `${parsed.data.action.toUpperCase()} ${parsed.data.ticker} (${parsed.data.market})`;
+  // Queue first, then send. If this process dies at any point after the
+  // queue write, the cron (or "Send pending alerts now") finishes the job.
   after(async () => {
-    const results = await Promise.allSettled([notifyNewPick(data.id), alertAdminsOfPublish(`pick ${summary}`, state.viewer.email)]);
+    const results = await Promise.allSettled([
+      enqueuePickAlerts(data.id).then(() => drainAlerts({ budgetMs: 40_000 })),
+      alertAdminsOfPublish(`pick ${summary}`, state.viewer.email),
+    ]);
     for (const r of results) {
       if (r.status === "rejected") {
         console.error(`[publish] after-publish task failed for pick ${data.id}: ${r.reason instanceof Error ? r.reason.message : r.reason}`);
@@ -326,31 +331,17 @@ export async function createProduct(_prev: FormState, formData: FormData): Promi
   if (error) return { values: echo(formData), error: `Could not create product: ${error.message}` };
 
   revalidatePath("/admin/products");
-  const planNote = await attachPlan(data.id, name, priceKobo, access_months);
-  return { ok: true, message: `Created "${name}". ${planNote}` };
+  const outcome = await ensurePaystackPlan(data.id);
+  return { ok: true, message: `Created "${name}". ${describePlanOutcome(outcome)}` };
 }
 
-async function attachPlan(productId: string, name: string, priceKobo: number, months: number): Promise<string> {
-  if (!paystackConfigured()) return "Paystack is not configured, so it sells as one-off only for now.";
-  try {
-    const plan = await createPlan({ name, amountKobo: priceKobo, accessMonths: months });
-    const supabase = await createClient();
-    const { error } = await supabase.from("products").update({ paystack_plan_code: plan.plan_code }).eq("id", productId);
-    if (error) return `Paystack plan ${plan.plan_code} was created but not saved: ${error.message}`;
-    return "Auto-renew is available.";
-  } catch (e) {
-    console.error(`[products] plan creation failed: ${e instanceof Error ? e.message : e}`);
-    return "Paystack plan creation failed, so it sells as one-off only. Retry from the list.";
-  }
-}
-
+/** Safe to click twice: ensurePaystackPlan creates at most one plan. */
 export async function retryPlan(formData: FormData) {
   await requireStaffAal2();
   const id = z.uuid().parse(formData.get("id"));
-  const supabase = await createClient();
-  const { data: p } = await supabase.from("products").select("name, price_kobo, access_months, paystack_plan_code").eq("id", id).single();
-  if (p && !p.paystack_plan_code) await attachPlan(id, p.name, p.price_kobo, p.access_months);
+  const outcome = await ensurePaystackPlan(id);
   revalidatePath("/admin/products");
+  redirect(`/admin/products?plan=${outcome.status}`);
 }
 
 export async function setProductActive(formData: FormData) {
@@ -361,4 +352,25 @@ export async function setProductActive(formData: FormData) {
   const { error } = await supabase.from("products").update({ active }).eq("id", id);
   if (error) throw new Error(error.message);
   revalidatePath("/admin/products");
+}
+
+/**
+ * Retries every pick alert that is due now (failed sends after their backoff,
+ * and any batch a crashed worker left behind). The cron does this every five
+ * minutes; this is the same thing on demand.
+ */
+export async function sendPendingAlerts() {
+  await requireStaffAal2();
+  let flag: string;
+  try {
+    await enqueueUnqueuedPicks();
+    const r = await drainAlerts({ budgetMs: 25_000 });
+    flag = `${r.sent}-${r.retrying}-${r.failed}`;
+  } catch (e) {
+    console.error(`[alerts] manual run failed: ${e instanceof Error ? e.message : e}`);
+    flag = "error";
+  }
+  revalidatePath("/admin");
+  // Outside the try: redirect() works by throwing.
+  redirect(`/admin?alerts=${flag}`);
 }

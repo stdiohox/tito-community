@@ -9,10 +9,11 @@
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
     "test:db": "tsx scripts/test-db.ts",
-    "seed": "tsx --env-file=.env.local scripts/seed.ts",
+    "seed": "node --conditions=react-server --env-file=.env.local --import tsx scripts/seed.ts",
     "vapid:keys": "web-push generate-vapid-keys",
     "test:payments": "node --conditions=react-server --import tsx --test scripts/payments.test.ts",
-    "test": "npm run test:db && npm run test:payments"
+    "test": "npm run test:db && npm run test:payments && npm run test:prelaunch",
+    "test:prelaunch": "node --conditions=react-server --import tsx --test scripts/prelaunch.test.ts"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.7",

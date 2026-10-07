@@ -3,7 +3,9 @@ import { requireStaffAal2 } from "@/lib/auth";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/server";
 import { daysUntil, shortDateTime } from "@/lib/format";
-import { buttonClass, Card, PageTitle } from "@/components/ui";
+import { buttonClass, Card, Notice, PageTitle } from "@/components/ui";
+import { SubmitButton } from "@/components/submit-button";
+import { sendPendingAlerts } from "../actions";
 
 export const metadata: Metadata = { title: "Admin" };
 
@@ -17,16 +19,20 @@ const ACTION_LABEL: Record<string, string> = {
   member_invited: "member invited",
 };
 
-export default async function AdminHome() {
+export default async function AdminHome({ searchParams }: PageProps<"/admin">) {
   // Layouts and pages render in parallel, so each page guards itself too.
   await requireStaffAal2();
+  const { alerts } = await searchParams;
   const supabase = await createClient();
-  const [{ data: ents }, { data: settings }, { count: pickCount }, { data: audit }] = await Promise.all([
+  const [{ data: ents }, { data: settings }, { count: pickCount }, { data: audit }, { count: waiting }, { count: failed }] = await Promise.all([
     supabase.from("entitlements").select("access_ends_at, status"),
     supabase.from("settings").select("grace_days").single(),
     supabase.from("picks").select("id", { count: "exact", head: true }).is("deleted_at", null),
     supabase.from("audit_log").select("id, action, target_type, created_at, detail").order("created_at", { ascending: false }).limit(12),
+    supabase.from("notification_deliveries").select("id", { count: "exact", head: true }).in("status", ["pending", "sending"]),
+    supabase.from("notification_deliveries").select("id", { count: "exact", head: true }).eq("status", "failed"),
   ]);
+  const ran = typeof alerts === "string" ? alerts.split("-").map(Number) : null;
 
   const grace = settings?.grace_days ?? 3;
   let active = 0;
@@ -66,6 +72,31 @@ export default async function AdminHome() {
           </Card>
         ))}
       </dl>
+      <section className="mt-10" aria-labelledby="alerts-heading">
+        <h2 id="alerts-heading" className="mb-3 font-display text-2xl text-forest">
+          Pick alerts
+        </h2>
+        <Card className="space-y-4 p-5">
+          {alerts === "error" ? (
+            <Notice tone="error">The run could not finish. Nothing was lost: every unsent alert is still queued. Try again shortly.</Notice>
+          ) : null}
+          {ran && ran.length === 3 && ran.every(Number.isFinite) ? (
+            <Notice tone={ran[2] > 0 ? "warning" : "success"}>
+              Run finished: {ran[0]} sent, {ran[1]} will retry, {ran[2]} could not be sent.
+            </Notice>
+          ) : null}
+          <p className="text-sm leading-relaxed text-muted">
+            <strong className="tabular font-medium text-ink">{waiting ?? 0}</strong> waiting to send ·{" "}
+            <strong className="tabular font-medium text-ink">{failed ?? 0}</strong> gave up. Alerts are queued when a pick is published
+            and retried automatically every five minutes until they go out, so a failure never loses them.
+          </p>
+          <form action={sendPendingAlerts}>
+            <SubmitButton variant="ghost" pending="Sending…">
+              Send pending alerts now
+            </SubmitButton>
+          </form>
+        </Card>
+      </section>
       <section className="mt-10" aria-labelledby="audit-heading">
         <h2 id="audit-heading" className="mb-3 font-display text-2xl text-forest">
           Recent activity

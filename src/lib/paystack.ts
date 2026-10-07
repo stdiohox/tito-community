@@ -3,6 +3,9 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { env } from "@/lib/env";
 
 const API = "https://api.paystack.co";
+// Every Paystack call gives up after this, well inside the ten-minute plan
+// claim and the serverless time limit.
+const TIMEOUT_MS = 20_000;
 
 export class PaystackNotConfigured extends Error {
   constructor() {
@@ -29,6 +32,7 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
       ...init?.headers,
     },
     cache: "no-store",
+    signal: AbortSignal.timeout(TIMEOUT_MS),
   });
   const body = (await res.json().catch(() => null)) as { status?: boolean; message?: string; data?: T } | null;
   if (!res.ok || !body?.status) {
@@ -57,18 +61,61 @@ export const PLAN_INTERVAL: Record<number, string> = {
   12: "annually",
 };
 
-export async function createPlan(input: { name: string; amountKobo: number; accessMonths: number }) {
+/**
+ * Every plan this app creates carries its product's id in the name. That tag
+ * is how a retry finds a plan an earlier attempt created but never saved
+ * (it crashed between Paystack's reply and our database write).
+ */
+export function planTag(productId: string): string {
+  return `[tc:${productId}]`;
+}
+
+export async function createPlan(input: { productId: string; name: string; amountKobo: number; accessMonths: number }) {
   const interval = PLAN_INTERVAL[input.accessMonths];
   if (!interval) throw new Error(`No Paystack interval for ${input.accessMonths} months`);
   return call<{ plan_code: string }>("/plan", {
     method: "POST",
     body: JSON.stringify({
-      name: `Tito Circle: ${input.name}`,
+      name: `Tito Circle: ${input.name} ${planTag(input.productId)}`,
       amount: input.amountKobo,
       interval,
       currency: "NGN",
     }),
   });
+}
+
+/** Finds a plan already created for this product, if any (newest first). */
+export async function findTaggedPlan(input: {
+  productId: string;
+  amountKobo: number;
+  accessMonths: number;
+}): Promise<string | null> {
+  const interval = PLAN_INTERVAL[input.accessMonths];
+  const tag = planTag(input.productId);
+  for (let page = 1; page <= 20; page++) {
+    const res = await fetch(
+      `${API}/plan?perPage=100&page=${page}&amount=${input.amountKobo}&interval=${interval}`,
+      { headers: { Authorization: `Bearer ${secret()}` }, cache: "no-store", signal: AbortSignal.timeout(TIMEOUT_MS) },
+    );
+    const body = (await res.json().catch(() => null)) as {
+      status?: boolean;
+      message?: string;
+      data?: { plan_code: string; name: string; createdAt?: string }[];
+      meta?: { pageCount?: number };
+    } | null;
+    if (!res.ok || !body?.status) {
+      throw new Error(`Paystack /plan list failed (${res.status}): ${body?.message ?? "no message"}`);
+    }
+    // The tag must END the name: a product name that merely contains another
+    // product's tag cannot hijack its plan.
+    const match = (body.data ?? []).filter((p) => p.name.endsWith(` ${tag}`));
+    if (match.length > 0) {
+      match.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+      return match[0].plan_code;
+    }
+    if (!body.meta?.pageCount || page >= body.meta.pageCount) return null;
+  }
+  return null;
 }
 
 export async function initializeTransaction(input: {

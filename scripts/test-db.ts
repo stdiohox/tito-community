@@ -456,6 +456,182 @@ async function main() {
     check('notification recipients = members with access only', JSON.stringify(recipients.sort()) === JSON.stringify(want), recipients)
   }
 
+  console.log('\nrate limiting (0002)')
+  {
+    const e = await fails(() =>
+      as(db, { role: 'authenticated', sub: id.active }, (tx) => tx.query(`select public.rate_limit_hit('x', 3, 60)`)),
+    )
+    check('members cannot call rate_limit_hit', e !== null && /permission denied/.test(e), e)
+
+    const r = await as(db, { role: 'service_role' }, async (tx) => {
+      const hit = async (key: string) =>
+        (await tx.query<{ ok: boolean }>(`select public.rate_limit_hit($1, 3, 900) ok`, [key])).rows[0].ok
+      const seq = [await hit('otp:a'), await hit('otp:a'), await hit('otp:a'), await hit('otp:a')]
+      const other = await hit('otp:b')
+      await tx.query(`update public.rate_limits set window_start = now() - interval '16 minutes' where key = 'otp:a'`)
+      const afterWindow = await hit('otp:a')
+      return { seq, other, afterWindow }
+    })
+    check(
+      'limit 3: three allowed, the fourth refused; keys independent; a new window resets',
+      JSON.stringify(r.seq) === '[true,true,true,false]' && r.other && r.afterWindow,
+      r,
+    )
+  }
+
+  console.log('\npaystack plan claim (0002)')
+  {
+    const r = await as(db, { role: 'service_role' }, async (tx) => {
+      const claim = async () =>
+        (await tx.query<{ t: string | null }>(`select public.claim_plan_creation($1)::text t`, [productId])).rows[0].t
+      const claimedAt = async () =>
+        (await tx.query<{ t: string | null }>(`select plan_claimed_at::text t from public.products where id = $1`, [productId])).rows[0].t
+      const first = await claim()
+      const second = await claim()
+      // Ten minutes is the expiry: still held at nine.
+      await tx.query(`update public.products set plan_claimed_at = now() - interval '9 minutes' where id = $1`, [productId])
+      const atNine = await claim()
+      await tx.query(`update public.products set plan_claimed_at = now() - interval '11 minutes' where id = $1`, [productId])
+      const oldToken = (await claimedAt())!
+      const afterStale = await claim()
+      // The abandoned request wakes up and releases: it must not clear the new claim.
+      await tx.query(`select public.release_plan_claim($1, $2::timestamptz)`, [productId, oldToken])
+      const stillHeld = (await claimedAt()) === afterStale
+      // The abandoned request also finishes first: its plan is saved (it is
+      // tagged for this product) but the newer claim is left alone...
+      const firstWinner = (await tx.query<{ w: string }>(`select public.finish_plan_creation($1, 'PLN_first', $2::timestamptz) w`, [productId, oldToken])).rows[0].w
+      const claimKept = (await claimedAt()) === afterStale
+      // ...and the current claimant's own plan does not replace it.
+      const secondWinner = (await tx.query<{ w: string }>(`select public.finish_plan_creation($1, 'PLN_second', $2::timestamptz) w`, [productId, afterStale])).rows[0].w
+      const cleared = (await claimedAt()) === null
+      const afterPlan = await claim()
+      return { first: Boolean(first), second, atNine, afterStale: Boolean(afterStale), stillHeld, firstWinner, claimKept, secondWinner, cleared, afterPlan }
+    })
+    check('one claim at a time; a claim is held for ten minutes, then expires', r.first && r.second === null && r.atNine === null && r.afterStale, r)
+    check('a late release from an expired claimant does not clear the newer claim', r.stillHeld, r)
+    check(
+      'a saved plan is never replaced: the first code wins and is returned to both callers',
+      r.firstWinner === 'PLN_first' && r.claimKept && r.secondWinner === 'PLN_first' && r.cleared && r.afterPlan === null,
+      r,
+    )
+  }
+
+  console.log('\npick alert queue (0002)')
+  {
+    // Fresh state for the queue: the earlier record_payment checks ran in
+    // rolled-back transactions, so recipients are active, expiring, graced.
+    const r = await as(db, { role: 'service_role' }, async (tx) => {
+      const claim = async () =>
+        (await tx.query<{ id: string; channel: string; attempts: number; email: string; endpoint: string | null }>(
+          `select * from public.claim_notification_batch(50, 300, 5)`,
+        )).rows
+      const enq = async (pid: string) =>
+        (await tx.query<{ n: number }>(`select public.enqueue_pick_notifications($1) n`, [pid])).rows[0].n
+
+      const queued = await enq(pickId)
+      const again = await enq(pickId)
+      const removed = (await tx.query<{ id: string }>(`select id from public.picks where ticker = 'OLDCO'`)).rows[0].id
+      const removedQueued = await enq(removed)
+
+      const batch1 = await claim()
+      const whileLocked = await claim()
+
+      // Crash: the worker died holding the lock. Once it lapses, the same
+      // rows are handed out again, with the attempt counted.
+      await tx.query(`update public.notification_deliveries set locked_until = now() - interval '1 second'`)
+      const afterCrash = await claim()
+
+      const [ok, transient, permanent, quota] = afterCrash
+      // The crashed worker (attempt 1) wakes up late and reports "failed":
+      // the row now belongs to attempt 2, so its report changes nothing.
+      const staleReport = (
+        await tx.query<{ r: boolean }>(`select public.complete_notification($1, 1, false, 'late', false, 5, null) r`, [ok.id])
+      ).rows[0].r
+      const staleLeftAlone = (
+        await tx.query<{ s: string }>(`select status s from public.notification_deliveries where id = $1`, [ok.id])
+      ).rows[0].s === 'sending'
+      await tx.query(`select public.complete_notification($1, 2, true, null, false, 5, null)`, [ok.id])
+      await tx.query(`select public.complete_notification($1, 2, false, 'timeout', false, 5, null)`, [transient.id])
+      await tx.query(`select public.complete_notification($1, 2, false, 'gone', true, 5, null)`, [permanent.id])
+      // A provider that says "try again in six hours" (a daily email quota).
+      await tx.query(`select public.complete_notification($1, 2, false, 'daily_quota_exceeded', false, 5, 21600)`, [quota.id])
+      const quotaDelay = (
+        await tx.query<{ ok: boolean }>(
+          `select next_attempt_at between now() + interval '5 hours 59 minutes' and now() + interval '6 hours 1 minute' ok
+             from public.notification_deliveries where id = $1`,
+          [quota.id],
+        )
+      ).rows[0].ok
+      // A finished row cannot be reopened by a stray report.
+      const reopen = (
+        await tx.query<{ r: boolean }>(`select public.complete_notification($1, 2, false, 'stray', false, 5, null) r`, [ok.id])
+      ).rows[0].r
+
+      const statuses = (
+        await tx.query<{ status: string; n: number }>(
+          `select status, count(*)::int n from public.notification_deliveries group by status order by status`,
+        )
+      ).rows
+      const backoffFuture = (
+        await tx.query<{ ok: boolean }>(`select next_attempt_at > now() ok from public.notification_deliveries where id = $1`, [transient.id])
+      ).rows[0].ok
+
+      // A member who lapses before their alert is sent is skipped, not sent:
+      // lapse the owner of the transiently-failed row, make it due, claim.
+      const owner = (
+        await tx.query<{ user_id: string }>(`select user_id from public.notification_deliveries where id = $1`, [transient.id])
+      ).rows[0].user_id
+      await tx.query(`update public.entitlements set access_ends_at = now() - interval '30 days' where user_id = $1`, [owner])
+      await tx.query(`update public.notification_deliveries set next_attempt_at = now() where id = $1`, [transient.id])
+      const afterLapse = await claim()
+      const lapsedRow = (
+        await tx.query<{ status: string }>(`select status from public.notification_deliveries where id = $1`, [transient.id])
+      ).rows[0].status
+
+      // Backoff never overflows, however many attempts a row has had.
+      await tx.query(`update public.notification_deliveries set status = 'sending', attempts = 40 where id = $1`, [quota.id])
+      const noOverflow = await fails(() =>
+        tx.query(`select public.complete_notification($1, 40, false, 'again', false, 50, null)`, [quota.id]),
+      )
+
+      return {
+        queued, again, removedQueued,
+        batch1: batch1.length, channels: batch1.map((b) => b.channel).sort(), whileLocked: whileLocked.length,
+        afterCrash: afterCrash.length, attempts: afterCrash.map((b) => b.attempts),
+        staleReport, staleLeftAlone, statuses, backoffFuture, quotaDelay, reopen,
+        afterLapse: afterLapse.length, lapsedRow, noOverflow,
+      }
+    })
+    check('enqueue: one email per member with access plus one push per device (3 + 1)', r.queued === 4 && r.batch1 === 4, r)
+    check('enqueueing twice adds nothing; a removed pick queues nothing', r.again === 0 && r.removedQueued === 0, r)
+    check('claimed rows are not handed out twice while locked', r.whileLocked === 0, r)
+    check('after a crash, the unsent rows are claimed again (attempt 2)', r.afterCrash === 4 && r.attempts.every((a) => a === 2), r)
+    check('a late report from a worker whose row was reclaimed changes nothing', r.staleReport === false && r.staleLeftAlone, r)
+    check(
+      'outcomes: sent, a transient failure backs off, a permanent one fails, a quota waits as long as told',
+      JSON.stringify(r.statuses) === JSON.stringify([{ status: 'failed', n: 1 }, { status: 'pending', n: 2 }, { status: 'sent', n: 1 }]) &&
+        r.backoffFuture && r.quotaDelay,
+      r.statuses,
+    )
+    check('a sent row cannot be reopened by a stray report', r.reopen === false, r)
+    check('a member who lapsed before their alert went out is skipped, not sent', r.lapsedRow === 'skipped' && r.afterLapse === 0, r)
+    check('backoff never overflows, however many attempts', r.noOverflow === null, r.noOverflow)
+
+    const staffRead = await as(db, { role: 'authenticated', sub: id.admin, aal: 'aal2' }, async (tx) => {
+      await tx.exec(`set local role postgres`)
+      await tx.query(`select public.enqueue_pick_notifications($1)`, [pickId])
+      await tx.exec(`set local role authenticated`)
+      return (await tx.query(`select id from public.notification_deliveries`)).rows.length
+    })
+    const memberRead = await as(db, { role: 'authenticated', sub: id.active }, async (tx) => {
+      await tx.exec(`set local role postgres`)
+      await tx.query(`select public.enqueue_pick_notifications($1)`, [pickId])
+      await tx.exec(`set local role authenticated`)
+      return (await tx.query(`select id from public.notification_deliveries`)).rows.length
+    })
+    check('staff (aal2) can read the queue; members cannot', staffRead === 4 && memberRead === 0, { staffRead, memberRead })
+  }
+
   console.log(`\n${passes} passed, ${failures} failed`)
   await db.close()
   if (failures > 0) process.exit(1)

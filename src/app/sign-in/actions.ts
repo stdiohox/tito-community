@@ -7,6 +7,7 @@ import { z } from "zod";
 import { createClient } from "@/lib/supabase/server";
 import { layout, sendEmail } from "@/lib/email";
 import { shortDateTime } from "@/lib/format";
+import { allow, clientIp, padTo, signInRules } from "@/lib/rate-limit";
 
 export type SignInState = {
   step: "email" | "code";
@@ -28,6 +29,10 @@ export async function signIn(prev: SignInState, formData: FormData): Promise<Sig
 const emailSchema = z.email().max(254).transform((e) => e.trim().toLowerCase());
 const codeSchema = z.string().trim().regex(/^\d{6,10}$/);
 
+const TOO_MANY = "Too many attempts. Wait 15 minutes, then try again.";
+// Every send-code answer takes at least this long, member or not.
+const SEND_MIN_MS = 600;
+
 /**
  * Invite-only: shouldCreateUser is false, AND public sign-ups are disabled in
  * the Supabase project (README step 3). The flag alone is not a control,
@@ -42,22 +47,36 @@ async function sendCode(prev: SignInState, formData: FormData): Promise<SignInSt
     return { step: "email", email: String(formData.get("email") ?? ""), error: "Enter a valid email address." };
   }
   const email = parsed.data;
+  const startedAt = Date.now();
 
-  const supabase = await createClient();
-  const { error } = await supabase.auth.signInWithOtp({
-    email,
-    options: { shouldCreateUser: false },
-  });
-
-  if (error) {
-    if (error.status === 429 || error.code === "over_email_send_rate_limit") {
-      return { step: "email", email, error: "Too many codes requested. Wait a minute, then try again." };
-    }
-    // Unknown address, sign-ups disabled and similar: indistinguishable from
-    // success on purpose. Logged for the operator, not shown to the visitor.
-    console.warn(`[sign-in] OTP not sent: ${error.code ?? error.status} ${error.message}`);
+  // Our limits run first and apply to every address alike, so being
+  // limited says nothing about whether the address is a member.
+  const allowed = await allow(signInRules("send", await clientIp(), email));
+  if (!allowed) {
+    await padTo(startedAt, SEND_MIN_MS);
+    return { step: "email", email, error: TOO_MANY };
   }
 
+  // The code is requested AFTER the response is sent. Supabase answers an
+  // unknown address faster than a member (no email goes out), so awaiting it
+  // here would let response time reveal membership. Deferred, every answer
+  // takes the same path whatever the address.
+  const supabase = await createClient();
+  after(async () => {
+    const { error } = await supabase.auth.signInWithOtp({
+      email,
+      options: { shouldCreateUser: false },
+    });
+    if (error) {
+      // Unknown address, sign-ups disabled, Supabase's own per-address
+      // throttle: never shown, because each would reveal membership. Logged
+      // for the operator.
+      console.warn(`[sign-in] OTP not sent: ${error.code ?? error.status} ${error.message}`);
+    }
+  });
+
+  // A small floor smooths the remaining variance (the rate-limit query).
+  await padTo(startedAt, SEND_MIN_MS);
   return { step: "code", email, sent: (prev.sent ?? 0) + 1 };
 }
 
@@ -69,6 +88,13 @@ async function verifyCode(prev: SignInState, formData: FormData): Promise<SignIn
   }
   if (!code.success) {
     return { ...prev, step: "code", email: email.data, error: "Enter the code from your email." };
+  }
+
+  // Caps code guessing per IP, per address-and-IP, and (loosely) per
+  // address, on top of Supabase's own limits.
+  const allowed = await allow(signInRules("verify", await clientIp(), email.data));
+  if (!allowed) {
+    return { ...prev, step: "code", email: email.data, error: TOO_MANY };
   }
 
   const supabase = await createClient();

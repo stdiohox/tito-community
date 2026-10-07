@@ -53,7 +53,9 @@ export function SignInForm() {
   return (
     <div className="space-y-5">
       <p role="status" aria-live="polite" className="text-[15px] leading-relaxed text-muted">
-        {(state.sent ?? 0) > 1 ? "A new code is on its way. " : ""}
+        {(state.sent ?? 0) > 1
+          ? "If you asked for a code in the last minute, use the one already in your inbox; otherwise a new one is on its way. "
+          : ""}
         If <strong className="font-medium text-ink">{state.email}</strong> belongs to a member, a sign-in code is on its
         way. It expires in a few minutes.
       </p>

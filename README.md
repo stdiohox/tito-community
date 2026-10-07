@@ -35,6 +35,28 @@ entitlements.access_ends_at + settings.grace_days > now()
   Removal is a one-way soft delete, and every staff action is in an insert-only audit log.
 - **Alerts are teasers.** Push notifications and emails say only that a new pick exists, never the
   ticker or prices, and go only to members with access at the moment of sending.
+- **Alerts are never lost.** Publishing queues one row per email and per device
+  (`notification_deliveries`). A worker claims rows, sends them and records each outcome.
+  - Failures back off and retry. A Resend quota error waits hours instead of giving up.
+  - A crashed worker's rows are reclaimed once its lock lapses, and a late report from a slow worker
+    can't overwrite a reclaimed row.
+  - Each email's delivery-row id is its Resend idempotency key, so a retry never sends a duplicate.
+  - A safety net (the cron, or "Send pending alerts now") queues any pick from the last day whose
+    publish died before queueing. Older picks are never announced as new.
+- **Sign-in is rate limited**, with counters in Postgres so every serverless instance shares them.
+  Limits fail closed.
+  - Codes sent: 10 per 15 min per IP, 5 per 15 min per email-and-IP, 30 per hour per email.
+  - Codes tried: 30, 10 and 50 on the same three keys.
+  - Authenticator codes: 10 per 15 min per admin.
+  - The tight per-email limits are keyed by email *and* IP, so someone who knows a member's address
+    can't lock them out.
+  - The IP comes only from Vercel's edge header. If it's unknown, the IP rules are skipped rather than
+    pooling every visitor into one bucket.
+  - The code itself is requested after the response is sent, so the answer looks and takes the same
+    whether or not the address is a member.
+- **Scripts run only with a per-request nonce.** `src/proxy.ts` sets a CSP of `script-src 'self'
+  'nonce-…' 'strict-dynamic'`, with no `'unsafe-inline'` (see `src/lib/csp.ts`). Every page renders per
+  request so it can carry the nonce.
 
 ## Routes
 
@@ -48,6 +70,7 @@ entitlements.access_ends_at + settings.grace_days > now()
 | `/membership/confirm` | signed in | Paystack return page; verifies the payment |
 | `/admin/*` | staff with two-factor | Overview, picks, notices, members, products |
 | `/api/paystack/webhook` | Paystack | Signed webhook |
+| `/api/cron/alerts` | Vercel Cron | Retries due pick alerts every 5 minutes (needs `CRON_SECRET`) |
 
 ---
 
@@ -57,11 +80,12 @@ entitlements.access_ends_at + settings.grace_days > now()
 
 New project, region **London (eu-west-2)**, the closest to Lagos and the UK diaspora.
 
-### 2. Apply the migration
+### 2. Apply the migrations
 
-Open **SQL Editor**, paste all of `supabase/migrations/0001_tito_circle.sql` and run it. (Or use
-`supabase db push` with the Supabase CLI.) Then run the two verification queries at the bottom of the
-file. The first must return **zero rows**.
+In **SQL Editor**, run each file in `supabase/migrations/` **in order**: first
+`0001_tito_circle.sql`, then `0002_prelaunch_hardening.sql`. (Or use `supabase db push` with the
+Supabase CLI.) Then run the verification queries at the bottom of each file. The "anon can execute"
+query must return **zero rows**.
 
 ### 3. Configure Auth (Authentication → Sign In / Providers, and Emails)
 
@@ -97,6 +121,7 @@ Copy `.env.example` to `.env.local` and fill it in. Set the same variables in Ve
 | `NEXT_PUBLIC_VAPID_PUBLIC_KEY` | for push | `npm run vapid:keys` |
 | `VAPID_PRIVATE_KEY` | for push | Same command. Server only |
 | `VAPID_SUBJECT` | for push | `mailto:you@titofinance.com` |
+| `CRON_SECRET` | for alert retries | Any long random string (`openssl rand -hex 32`). Vercel Cron sends it to `/api/cron/alerts` |
 | `SEED_EMAIL` | seed only | Your own inbox (see step 5) |
 
 Anything optional that is missing turns its feature off, with a clear message in the UI and the
@@ -121,8 +146,8 @@ The seed is safe to re-run. With `SEED_EMAIL=you@gmail.com` it creates:
 
 It also creates two products, *Circle · 1 month* (₦60,000, a placeholder price) and *Circle · 6 months*
 (₦300,000, matching Close Community), plus two clearly labelled **sample** picks, an update and a
-notice. If `PAYSTACK_SECRET_KEY` is set, it creates Paystack plans for the products so auto-renew is
-available.
+notice. If `PAYSTACK_SECRET_KEY` is set, it gives each product a Paystack plan so auto-renew is
+available. It uses the same idempotent path as the admin, so re-running never creates a second plan.
 
 Every sign-in code for every demo account lands in your inbox. Each member accepts the disclaimer on
 first sign-in; until they do, the database itself gives them no access.
@@ -163,7 +188,11 @@ What happens on a payment:
 
 ### 7. Deploy
 
-1. Import the repo into Vercel and set the environment variables.
+1. Import the repo into Vercel and set the environment variables, including `CRON_SECRET`.
+   `vercel.json` schedules `/api/cron/alerts` every 5 minutes. That needs a Vercel **Pro** plan; Hobby
+   only allows a daily cron and rejects the deploy. On Hobby, change the schedule to `0 6 * * *`. Alerts
+   are still sent straight after publishing, and admins can retry from the overview with "Send pending
+   alerts now".
 2. Add the domain `community.titofinance.com`, with a CNAME at the DNS provider pointing to Vercel.
 3. Set Supabase's Site URL and Paystack's live webhook to that domain when you switch to live keys.
 
@@ -172,16 +201,19 @@ What happens on a payment:
 ## Tests
 
 ```bash
-npm test            # both suites
-npm run test:db     # migration + RLS, replayed in PGlite as anon / member / staff / service role
-npm run test:payments  # real processReference() and webhook handler against the real migration
+npm test               # all three suites
+npm run test:db        # migrations + RLS, replayed in PGlite as anon / member / staff / service role
+npm run test:payments  # real processReference() and webhook handler against the real migrations
+npm run test:prelaunch # CSP, rate limits, plan idempotency, alert queue crash recovery
 npm run typecheck && npm run lint && npm run build
 ```
 
 `test:db` reproduces Supabase's default privileges, including the direct `EXECUTE` grants to
 `anon`. A function that loses its explicit revoke therefore fails the suite.
 
-`test:payments` fakes only the network boundary: Paystack's verify API and Supabase's REST layer.
+`test:payments` and `test:prelaunch` run the real server modules and fake only the network boundary
+(`scripts/fake-network.ts`): Paystack's API, and Supabase's REST layer translated to SQL on the real
+migrations.
 
 ## Deliberately not in this build
 
@@ -192,14 +224,9 @@ npm run typecheck && npm run lint && npm run build
   - device or session limits;
   - re-authentication on every publish (two-factor is required per session instead);
   - attachment watermarking.
-- **Known, accepted for the demo** (from the security review; fix before launch):
-  - The CSP allows `'unsafe-inline'` scripts. A nonce-based CSP set in `src/proxy.ts` would remove that.
-  - Sign-in relies on Supabase's own OTP rate limits. A non-member's request may return slightly faster
-    than a member's, so timing could hint at membership. Add a per-IP throttle with equalised timing.
-  - Retrying a failed Paystack plan creation twice quickly can create two plans on Paystack. Only one
-    is saved.
-  - A pick notification is claimed before sending. If the process dies mid-send, that pick's alerts are
-    not retried. It is logged.
+- **Inline styles** are still allowed by the CSP (`style-src 'unsafe-inline'`). The UI sets
+  per-element style attributes, which nonces cannot cover, and style injection is far lower-risk than
+  script injection.
 - **Disclaimer wording** in `src/lib/disclaimer.ts` is a draft for Tito's lawyer. To change it, add a
   new version there, deploy, then bump `settings.disclaimer_version`. Members re-accept on their next
   visit.

@@ -7,6 +7,7 @@ import { getMemberState, type MemberState } from "@/lib/auth";
 import { env } from "@/lib/env";
 import { layout, sendEmail } from "@/lib/email";
 import { enrollmentOpen } from "@/lib/staff";
+import { allow, keyFor, LIMITS } from "@/lib/rate-limit";
 import { createClient, createServiceClient } from "@/lib/supabase/server";
 
 export type MfaState = {
@@ -68,6 +69,10 @@ export async function verifyTotp(prev: MfaState, formData: FormData): Promise<Mf
   const state = await requireStaff();
   const parsed = verifySchema.safeParse({ factorId: formData.get("factorId"), code: formData.get("code") });
   if (!parsed.success) return { ...prev, error: "Enter the 6-digit code from your authenticator app." };
+
+  // A 6-digit code is guessable without a cap.
+  const allowed = await allow([{ key: keyFor("totp-verify-user", state.viewer.userId), ...LIMITS.totpVerifyPerUser }]);
+  if (!allowed) return { ...prev, error: "Too many attempts. Wait 15 minutes, then try again." };
 
   const supabase = await createClient();
   // The factor must be one of this user's own.

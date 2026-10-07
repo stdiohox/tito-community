@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { Cormorant_Garamond, DM_Mono, DM_Sans } from "next/font/google";
+import { connection } from "next/server";
 import "./globals.css";
 
 const cormorant = Cormorant_Garamond({
@@ -36,7 +37,10 @@ export const viewport: Viewport = {
   viewportFit: "cover",
 };
 
-export default function RootLayout({ children }: LayoutProps<"/">) {
+export default async function RootLayout({ children }: LayoutProps<"/">) {
+  // Every page renders per request: Next.js stamps each request's CSP nonce
+  // on its scripts while rendering, which a prerendered page cannot get.
+  await connection();
   return (
     <html lang="en-NG" className={`${cormorant.variable} ${dmSans.variable} ${dmMono.variable} antialiased`}>
       <body className="min-h-dvh">{children}</body>

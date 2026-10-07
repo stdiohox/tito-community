@@ -4,14 +4,25 @@ import { ProductForm } from "../forms";
 import { retryPlan, setProductActive } from "../../actions";
 import { createClient } from "@/lib/supabase/server";
 import { SubmitButton } from "@/components/submit-button";
-import { Card, PageTitle } from "@/components/ui";
+import { Card, Notice, PageTitle } from "@/components/ui";
 import { ACCESS_MONTH_LABEL, naira } from "@/lib/format";
 
 export const metadata: Metadata = { title: "Products · Admin" };
 
-export default async function AdminProducts() {
+const PLAN_RESULT: Record<string, { tone: "success" | "warning" | "error"; text: string }> = {
+  attached: { tone: "success", text: "Auto-renew is now available for that product." },
+  reused: { tone: "success", text: "Auto-renew is now available (an existing Paystack plan was reused, not duplicated)." },
+  existing: { tone: "success", text: "That product already had auto-renew; nothing was created." },
+  busy: { tone: "warning", text: "Auto-renew is already being set up for that product. Refresh in a moment." },
+  unconfigured: { tone: "warning", text: "Paystack is not configured, so products sell as one-off only." },
+  failed: { tone: "error", text: "Paystack plan set-up failed. Nothing was duplicated; try again shortly." },
+};
+
+export default async function AdminProducts({ searchParams }: PageProps<"/admin/products">) {
   // Layouts and pages render in parallel, so each page guards itself too.
   await requireStaffAal2();
+  const { plan } = await searchParams;
+  const planResult = typeof plan === "string" ? PLAN_RESULT[plan] : undefined;
   const supabase = await createClient();
   const { data } = await supabase
     .from("products")
@@ -24,6 +35,11 @@ export default async function AdminProducts() {
         Each product grants access for its length. Prices can&apos;t be edited once created, because live auto-renewals are billed on
         them; retire a product and create a new one instead.
       </PageTitle>
+      {planResult ? (
+        <div className="mb-6">
+          <Notice tone={planResult.tone}>{planResult.text}</Notice>
+        </div>
+      ) : null}
       <Card className="mb-8 p-5 sm:p-6">
         <ProductForm />
       </Card>

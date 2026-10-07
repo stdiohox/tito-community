@@ -32,24 +32,45 @@ export async function sendEmail(mail: Mail): Promise<boolean> {
   return true;
 }
 
-/** Sends to many, 100 per Resend batch call. Returns how many were accepted. */
-export async function sendBatch(mails: Mail[]): Promise<number> {
+export type SendOutcome =
+  | { ok: true }
+  | { ok: false; permanent: boolean; error: string; retryAfterSeconds?: number };
+
+// Resend error codes worth retrying soon (normal backoff).
+const RETRYABLE = new Set(["rate_limit_exceeded", "internal_server_error", "application_error", "concurrent_idempotent_requests"]);
+// Quota errors clear on their own, just not soon: retry after a long wait
+// rather than give up, so a launch-day pick beyond the plan's daily quota
+// still reaches everyone.
+const QUOTA_WAIT_SECONDS: Record<string, number> = {
+  daily_quota_exceeded: 6 * 3600,
+  monthly_quota_exceeded: 24 * 3600,
+};
+const SEND_TIMEOUT_MS = 15_000;
+
+/**
+ * One email with an idempotency key. Resend sends at most one email per key,
+ * so a retry after a crash or a timeout (same key) can never deliver a
+ * duplicate. Times out rather than hang a whole batch.
+ */
+export async function sendIdempotent(mail: Mail, idempotencyKey: string): Promise<SendOutcome> {
   const r = resend();
-  if (!r) {
-    console.warn(`[email] not configured; skipped ${mails.length} emails`);
-    return 0;
+  if (!r) return { ok: false, permanent: true, error: "Email is not configured (RESEND_API_KEY / EMAIL_FROM)" };
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`Resend did not answer within ${SEND_TIMEOUT_MS / 1000}s`)), SEND_TIMEOUT_MS);
+    });
+    const { error } = await Promise.race([r.emails.send({ from: env.emailFrom()!, ...mail }, { idempotencyKey }), timeout]);
+    if (!error) return { ok: true };
+    const wait = QUOTA_WAIT_SECONDS[error.name];
+    if (wait) return { ok: false, permanent: false, error: `${error.name}: ${error.message}`, retryAfterSeconds: wait };
+    return { ok: false, permanent: !RETRYABLE.has(error.name), error: `${error.name}: ${error.message}` };
+  } catch (e) {
+    // Network failure or timeout: worth retrying (the key prevents a double).
+    return { ok: false, permanent: false, error: e instanceof Error ? e.message : String(e) };
+  } finally {
+    clearTimeout(timer);
   }
-  let sent = 0;
-  for (let i = 0; i < mails.length; i += 100) {
-    const chunk = mails.slice(i, i + 100).map((m) => ({ from: env.emailFrom()!, ...m }));
-    const { error } = await r.batch.send(chunk);
-    if (error) {
-      console.error(`[email] batch ${i / 100 + 1} failed: ${error.message}`);
-    } else {
-      sent += chunk.length;
-    }
-  }
-  return sent;
 }
 
 const escape = (s: string) =>

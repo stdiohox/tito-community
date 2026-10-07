@@ -18,6 +18,7 @@
  * the values above on every run (so "expiring in 2 days" stays true).
  */
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { describePlanOutcome, ensurePaystackPlan } from "../src/lib/plans";
 
 function need(name: string): string {
   const v = process.env[name];
@@ -57,41 +58,25 @@ async function setAccess(userId: string, endsAt: Date) {
   if (error) throw new Error(`entitlement: ${error.message}`);
 }
 
-const INTERVAL: Record<number, string> = { 1: "monthly", 3: "quarterly", 6: "biannually", 12: "annually" };
-
-async function paystackPlan(name: string, amountKobo: number, months: number): Promise<string | null> {
-  const key = process.env.PAYSTACK_SECRET_KEY;
-  if (!key) return null;
-  const res = await fetch("https://api.paystack.co/plan", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ name: `Tito Circle: ${name}`, amount: amountKobo, interval: INTERVAL[months], currency: "NGN" }),
-  });
-  const body = (await res.json()) as { status: boolean; message: string; data?: { plan_code: string } };
-  if (!body.status || !body.data) {
-    console.warn(`  Paystack plan for "${name}" not created: ${body.message}`);
-    return null;
-  }
-  return body.data.plan_code;
-}
-
 async function seedProducts(adminId: string) {
   const { count } = await db.from("products").select("id", { count: "exact", head: true });
-  if ((count ?? 0) > 0) {
-    console.log("products: already present, left alone");
-    return;
+  if ((count ?? 0) === 0) {
+    // Demo prices. The 6-month price matches Close Community in the CRM
+    // catalogue; the 1-month price is a placeholder for Tito to set.
+    const { error } = await db.from("products").insert([
+      { name: "Circle · 1 month", description: "A month of picks, updates and notices.", price_kobo: 6_000_000, access_months: 1, created_by: adminId },
+      { name: "Circle · 6 months", description: "Six months in the Circle. Best value.", price_kobo: 30_000_000, access_months: 6, created_by: adminId },
+    ]);
+    if (error) throw new Error(`products: ${error.message}`);
   }
-  // Demo prices. The 6-month price matches Close Community in the CRM
-  // catalogue; the 1-month price is a placeholder for Tito to set.
-  const products = [
-    { name: "Circle · 1 month", description: "A month of picks, updates and notices.", price_kobo: 6_000_000, access_months: 1 },
-    { name: "Circle · 6 months", description: "Six months in the Circle. Best value.", price_kobo: 30_000_000, access_months: 6 },
-  ];
+
+  // Auto-renew plans, through the same idempotent path the admin uses: safe
+  // to re-run, and it picks up products seeded before Paystack was set up.
+  const { data: products, error } = await db.from("products").select("id, name").order("price_kobo");
+  if (error) throw new Error(`products: ${error.message}`);
   for (const p of products) {
-    const plan = await paystackPlan(p.name, p.price_kobo, p.access_months);
-    const { error } = await db.from("products").insert({ ...p, paystack_plan_code: plan, created_by: adminId });
-    if (error) throw new Error(`product ${p.name}: ${error.message}`);
-    console.log(`product: ${p.name}${plan ? ` (plan ${plan})` : " (one-off only: no PAYSTACK_SECRET_KEY)"}`);
+    const outcome = await ensurePaystackPlan(p.id);
+    console.log(`product: ${p.name} (${describePlanOutcome(outcome)})`);
   }
 }
 
