@@ -12,8 +12,10 @@
     "seed": "node --conditions=react-server --env-file=.env.local --import tsx scripts/seed.ts",
     "vapid:keys": "web-push generate-vapid-keys",
     "test:payments": "node --conditions=react-server --import tsx --test scripts/payments.test.ts",
-    "test": "npm run test:db && npm run test:payments && npm run test:prelaunch",
-    "test:prelaunch": "node --conditions=react-server --import tsx --test scripts/prelaunch.test.ts"
+    "test": "npm run test:db && npm run test:payments && npm run test:prelaunch && npm run test:demo",
+    "test:prelaunch": "node --conditions=react-server --import tsx --test scripts/prelaunch.test.ts",
+    "test:demo": "node --conditions=react-server --import tsx --test scripts/demo.test.ts",
+    "prebuild": "node --import tsx scripts/build-demo-snapshot.ts"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.7",
@@ -24,10 +26,10 @@
     "resend": "^6.32.1",
     "server-only": "^0.0.1",
     "web-push": "^3.6.7",
-    "zod": "^4.6.5"
+    "zod": "^4.6.5",
+    "@electric-sql/pglite": "^0.5.8"
   },
   "devDependencies": {
-    "@electric-sql/pglite": "^0.5.8",
     "@tailwindcss/turbopack": "^4",
     "@types/node": "^20",
     "@types/react": "^19",

@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import { SignInForm } from "./sign-in-form";
 import { Wordmark } from "@/components/ui";
+import { isDemo } from "@/lib/demo/mode";
+import { DEMO_USERS } from "@/lib/demo/seed";
 
 export const metadata: Metadata = { title: "Sign in" };
 
@@ -26,6 +28,19 @@ export default function SignInPage() {
           <h1 className="mb-5 font-display text-3xl text-forest">Members sign in</h1>
           <SignInForm />
         </div>
+
+        {isDemo() ? (
+          <div className="rise mt-6 rounded-2xl border border-gold/40 bg-forest-900/60 p-4 text-sm text-ivory/85" style={{ ["--i" as string]: 3 }}>
+            <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-gold">Demo sign-in</p>
+            <p className="mt-2 leading-relaxed">Use any of these addresses. Any 6-digit code works.</p>
+            <ul className="mt-2 space-y-1 font-mono text-xs">
+              <li>{DEMO_USERS.admin.email} · Tito (admin)</li>
+              <li>{DEMO_USERS.active.email} · active</li>
+              <li>{DEMO_USERS.expiring.email} · expiring</li>
+              <li>{DEMO_USERS.expired.email} · expired</li>
+            </ul>
+          </div>
+        ) : null}
 
         <p className="rise mt-8 text-center text-xs leading-relaxed text-ivory/60" style={{ ["--i" as string]: 4 }}>
           Membership is by invitation. To join, speak to the Tito Finance team.

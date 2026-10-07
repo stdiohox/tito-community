@@ -1,6 +1,7 @@
 import "server-only";
 import { Resend } from "resend";
 import { env } from "@/lib/env";
+import { isDemo } from "@/lib/demo/mode";
 
 type Mail = { to: string; subject: string; text: string; html: string };
 
@@ -19,6 +20,9 @@ export function emailConfigured(): boolean {
 
 /** Sends one email. Returns false (and logs why) when email is not configured. */
 export async function sendEmail(mail: Mail): Promise<boolean> {
+  if (isDemo()) {
+    return (await import("@/lib/demo/outbox")).recordDemoEmail(mail);
+  }
   const r = resend();
   if (!r) {
     console.warn(`[email] RESEND_API_KEY or EMAIL_FROM not set; not sending "${mail.subject}"`);
@@ -53,6 +57,11 @@ const SEND_TIMEOUT_MS = 15_000;
  * duplicate. Times out rather than hang a whole batch.
  */
 export async function sendIdempotent(mail: Mail, idempotencyKey: string): Promise<SendOutcome> {
+  if (isDemo()) {
+    // Client preview mode: the demo outbox, never a real inbox.
+    const recorded = await (await import("@/lib/demo/outbox")).recordDemoEmail(mail);
+    return recorded ? { ok: true } : { ok: false, permanent: false, error: "Demo outbox unavailable" };
+  }
   const r = resend();
   if (!r) return { ok: false, permanent: true, error: "Email is not configured (RESEND_API_KEY / EMAIL_FROM)" };
   let timer: ReturnType<typeof setTimeout> | undefined;

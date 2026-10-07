@@ -1,8 +1,19 @@
 import "server-only";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { env } from "@/lib/env";
+import { isDemo } from "@/lib/demo/mode";
 
 const API = "https://api.paystack.co";
+
+// In client preview mode Paystack is the in-process simulator; nothing
+// ever reaches the real API.
+async function http(input: string, init: RequestInit): Promise<Response> {
+  if (isDemo()) {
+    const { demoFetch } = await import("@/lib/demo/fetch");
+    return demoFetch(input, init);
+  }
+  return fetch(input, init);
+}
 // Every Paystack call gives up after this, well inside the ten-minute plan
 // claim and the serverless time limit.
 const TIMEOUT_MS = 20_000;
@@ -24,7 +35,7 @@ export function paystackConfigured(): boolean {
 }
 
 async function call<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${API}${path}`, {
+  const res = await http(`${API}${path}`, {
     ...init,
     headers: {
       Authorization: `Bearer ${secret()}`,
@@ -93,7 +104,7 @@ export async function findTaggedPlan(input: {
   const interval = PLAN_INTERVAL[input.accessMonths];
   const tag = planTag(input.productId);
   for (let page = 1; page <= 20; page++) {
-    const res = await fetch(
+    const res = await http(
       `${API}/plan?perPage=100&page=${page}&amount=${input.amountKobo}&interval=${interval}`,
       { headers: { Authorization: `Bearer ${secret()}` }, cache: "no-store", signal: AbortSignal.timeout(TIMEOUT_MS) },
     );

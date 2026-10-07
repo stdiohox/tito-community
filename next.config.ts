@@ -1,4 +1,9 @@
 import type { NextConfig } from "next";
+import { isDemo } from "./src/lib/demo/mode";
+
+// Client preview mode is refused at build time too: DEMO_MODE=true alongside
+// any real service key fails the build (isDemo() throws).
+const demo = isDemo();
 
 // Every page in this app is per-member and access can end at any second, so
 // Cache Components (on by default in the scaffold) is turned off: nothing
@@ -9,6 +14,25 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   cacheComponents: false,
+  // The demo database engine (WASM) is loaded from node_modules at run time.
+  serverExternalPackages: ["@electric-sql/pglite"],
+  // Files the demo reads at run time: the real migrations it runs, and the
+  // engine's binaries. Only shipped in a demo build.
+  ...(demo
+    ? {
+        outputFileTracingIncludes: Object.fromEntries(
+          ["/*", "/**"].map((route) => [
+            route,
+            [
+              "./supabase/migrations/*.sql",
+              "./scripts/supabase-stubs.sql",
+              "./.demo/schema.tar.gz",
+              "./node_modules/@electric-sql/pglite/dist/*.{js,wasm,data}",
+            ],
+          ]),
+        ),
+      }
+    : {}),
   turbopack: {
     rules: {
       "*.css": {

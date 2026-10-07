@@ -1,4 +1,4 @@
-import { after } from "next/server";
+import { afterResponse } from "@/lib/after-response";
 import { env } from "@/lib/env";
 import { layout, sendEmail } from "@/lib/email";
 import { processReference } from "@/lib/payments";
@@ -149,7 +149,7 @@ async function paymentFailed(event: PaystackEvent) {
   }
 
   const url = `${env.siteUrl()}/membership`;
-  after(() =>
+  await afterResponse(() =>
     sendEmail({
       to: member.email,
       subject: "Your Tito Circle renewal did not go through",

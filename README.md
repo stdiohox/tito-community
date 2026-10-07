@@ -198,13 +198,67 @@ What happens on a payment:
 
 ---
 
+## Client preview mode (demo)
+
+Every screen, clickable, with **no** Supabase, Resend or Paystack. It is live at
+**https://tito-circle-demo.vercel.app** (Vercel project `tito-circle-demo`).
+
+```bash
+DEMO_MODE=true npm run dev        # locally, with no .env.local
+```
+
+### What you get
+
+- **A banner** on every page: "Demo — sample data". Every page is also `noindex`.
+- **A persona switcher** (bottom right): Admin (Tito), Active member (Ada, who hasn't accepted the
+  disclaimer yet, so you see that step), Expiring member (Bola, 2 days left), Expired member (Chidi),
+  Signed out. It also has "Reset sample data" and an outbox of every email the app would have sent.
+- **Sign-in through the form:** use any address on the sign-in page with any 6-digit code. Signing in
+  as Tito asks for the two-factor code, and any 6 digits pass.
+- **Realistic sample data:** picks with charts and update threads, notices, three products, and members
+  in every state, all dated relative to today.
+- **Admin actions:** publishing a pick puts it at the top of the member feed. Invite, extend, revoke and
+  products all work.
+- **Payments:** "Pay once" and "Auto-renew" open a simulated Paystack checkout. "Pay" runs the app's real
+  payment code: the signed webhook, verification and `record_payment`, so access really extends. Auto-renew
+  can be turned off on a simulated Paystack page.
+
+### How it works
+
+- Each visitor gets a private copy of the sample data: an in-process Postgres (PGlite) that ran the
+  **real migrations**. Every screen therefore runs the real queries under the real RLS.
+- Supabase (REST, Auth, Storage) and Paystack are answered in-process (`src/lib/demo/`). Email goes to
+  the outbox.
+- Vercel may serve a page and its form from different servers. So each visitor's changes are also kept as
+  an HMAC-signed, compressed log in their own cookie, and any server replays it.
+
+### Safety
+
+- **Off unless `DEMO_MODE=true`.**
+- **Refused alongside real keys.** If any real service key is set (`NEXT_PUBLIC_SUPABASE_URL`,
+  `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `PAYSTACK_SECRET_KEY`, `RESEND_API_KEY`,
+  `VAPID_PRIVATE_KEY`), the build fails, the server refuses to boot, and every request errors. A real
+  deployment can never be flipped into a demo, and a demo can never run on real services.
+- **No outside network.** The demo's transport refuses every host except its own in-process fakes.
+- **Required secret.** A production demo needs `DEMO_SECRET` (32+ random characters). It signs demo
+  sessions and the state cookie.
+- `npm run test:demo` covers all of the above.
+
+### Deploying the demo
+
+The demo is its own Vercel project with only `DEMO_MODE=true` and `DEMO_SECRET` set. It deploys with
+`vercel.demo.json` as its `vercel.json` (Next.js preset, no cron: the account is on Hobby). Deploy from a
+copy of the repo with that file swapped in, so the real project's `vercel.json` stays as it is. `prebuild`
+snapshots the migrated schema (demo builds only), so a cold server is ready in about 2 seconds.
+
 ## Tests
 
 ```bash
-npm test               # all three suites
+npm test               # all four suites
 npm run test:db        # migrations + RLS, replayed in PGlite as anon / member / staff / service role
 npm run test:payments  # real processReference() and webhook handler against the real migrations
 npm run test:prelaunch # CSP, rate limits, plan idempotency, alert queue crash recovery
+npm run test:demo      # client preview mode: off by default, refused with real keys, no outside network
 npm run typecheck && npm run lint && npm run build
 ```
 

@@ -1,6 +1,6 @@
 "use server";
 
-import { after } from "next/server";
+import { afterResponse } from "@/lib/after-response";
 import { redirect } from "next/navigation";
 import { z } from "zod";
 import { getMemberState, type MemberState } from "@/lib/auth";
@@ -95,7 +95,7 @@ export async function verifyTotp(prev: MfaState, formData: FormData): Promise<Mf
     if (closeError) console.error(`[mfa] could not close enrolment window: ${closeError.message}`);
 
     const to = [...new Set([state.viewer.email, ...env.adminAlertEmails()])].filter(Boolean);
-    after(() =>
+    await afterResponse(() =>
       Promise.all(
         to.map((address) =>
           sendEmail({

@@ -1,6 +1,6 @@
 "use server";
 
-import { after } from "next/server";
+import { afterResponse } from "@/lib/after-response";
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { z } from "zod";
@@ -62,7 +62,7 @@ async function sendCode(prev: SignInState, formData: FormData): Promise<SignInSt
   // here would let response time reveal membership. Deferred, every answer
   // takes the same path whatever the address.
   const supabase = await createClient();
-  after(async () => {
+  await afterResponse(async () => {
     const { error } = await supabase.auth.signInWithOtp({
       email,
       options: { shouldCreateUser: false },
@@ -106,7 +106,7 @@ async function verifyCode(prev: SignInState, formData: FormData): Promise<SignIn
   // A sign-in alert discourages shared logins and tells a member at once if
   // someone else got in. Sent after the response so sign-in stays fast.
   const agent = (await headers()).get("user-agent") ?? "an unknown device";
-  after(async () => {
+  await afterResponse(async () => {
     await sendEmail({
       to: email.data,
       subject: "New sign-in to Tito Circle",

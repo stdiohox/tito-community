@@ -1,0 +1,6 @@
+# Never upload local secrets or local-only tooling.
+.env*
+!.env.example
+.local
+.next
+node_modules

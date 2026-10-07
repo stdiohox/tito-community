@@ -1,6 +1,10 @@
 import type { Metadata, Viewport } from "next";
 import { Cormorant_Garamond, DM_Mono, DM_Sans } from "next/font/google";
 import { connection } from "next/server";
+import { DemoBanner, PersonaSwitcher, personaOf } from "@/components/demo-chrome";
+import { getViewer } from "@/lib/auth";
+import { isDemo } from "@/lib/demo/mode";
+import { demoStorageFull } from "@/lib/demo/db";
 import "./globals.css";
 
 const cormorant = Cormorant_Garamond({
@@ -41,9 +45,16 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
   // Every page renders per request: Next.js stamps each request's CSP nonce
   // on its scripts while rendering, which a prerendered page cannot get.
   await connection();
+  const demo = isDemo();
+  const persona = demo ? personaOf((await getViewer())?.userId ?? null) : null;
+  const storageFull = demo ? await demoStorageFull() : false;
   return (
     <html lang="en-NG" className={`${cormorant.variable} ${dmSans.variable} ${dmMono.variable} antialiased`}>
-      <body className="min-h-dvh">{children}</body>
+      <body className="min-h-dvh">
+        {demo ? <DemoBanner /> : null}
+        {children}
+        {persona ? <PersonaSwitcher current={persona} storageFull={storageFull} /> : null}
+      </body>
     </html>
   );
 }

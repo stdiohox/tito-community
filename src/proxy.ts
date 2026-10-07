@@ -1,6 +1,8 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 import { buildCsp, newNonce, supabaseOriginOf } from "@/lib/csp";
+import { DEMO_COOKIES, isDemo } from "@/lib/demo/mode";
+import { accessTokenFromCookies, mintSid, verifyDemoJwt, verifySid } from "@/lib/demo/token";
 
 // Paths a signed-out visitor may reach. Everything else bounces to sign-in.
 const PUBLIC_PATHS = ["/sign-in"];
@@ -38,6 +40,37 @@ export async function proxy(request: NextRequest) {
   const next = () => NextResponse.next({ request: { headers: requestHeaders } });
 
   let response = next();
+
+  // Client preview mode: every visitor gets a private sandbox id, and
+  // "signed in" means holding a demo session token signed by this
+  // deployment. No network, no real auth. (isDemo() throws if real keys are
+  // also set, which stops every request: the demo can never run on them.)
+  if (isDemo()) {
+    let sid = request.cookies.get(DEMO_COOKIES.sid)?.value;
+    const freshSid = !verifySid(sid);
+    if (freshSid) {
+      sid = mintSid();
+      request.cookies.set(DEMO_COOKIES.sid, sid);
+      requestHeaders.set("cookie", request.headers.get("cookie") ?? "");
+      response = next();
+    }
+    const signedIn = Boolean(verifyDemoJwt(accessTokenFromCookies(request.cookies.getAll()))?.sub);
+    const path = request.nextUrl.pathname;
+    const isPublic = [...PUBLIC_PATHS, "/demo/outbox"].some((p) => path === p || path.startsWith(`${p}/`));
+    let out: NextResponse = response;
+    if (!signedIn && !isPublic) out = redirectKeepingCookies(request, response, "/sign-in");
+    else if (signedIn && path === "/sign-in") out = redirectKeepingCookies(request, response, "/");
+    if (freshSid) {
+      out.cookies.set(DEMO_COOKIES.sid, sid!, {
+        httpOnly: true,
+        sameSite: "lax",
+        secure: process.env.NODE_ENV === "production",
+        path: "/",
+        maxAge: 60 * 60 * 24 * 7,
+      });
+    }
+    return withCsp(out);
+  }
 
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;

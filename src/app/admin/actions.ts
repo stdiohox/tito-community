@@ -3,7 +3,7 @@
 import { randomUUID } from "node:crypto";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
-import { after } from "next/server";
+import { afterResponse } from "@/lib/after-response";
 import { z } from "zod";
 import { requireStaffAal2 } from "@/lib/auth";
 import { env } from "@/lib/env";
@@ -97,7 +97,7 @@ export async function createPick(_prev: FormState, formData: FormData): Promise<
   const summary = `${parsed.data.action.toUpperCase()} ${parsed.data.ticker} (${parsed.data.market})`;
   // Queue first, then send. If this process dies at any point after the
   // queue write, the cron (or "Send pending alerts now") finishes the job.
-  after(async () => {
+  await afterResponse(async () => {
     const results = await Promise.allSettled([
       enqueuePickAlerts(data.id).then(() => drainAlerts({ budgetMs: 40_000 })),
       alertAdminsOfPublish(`pick ${summary}`, state.viewer.email),
@@ -133,7 +133,7 @@ export async function postUpdate(_prev: FormState, formData: FormData): Promise<
   const { error } = await supabase.from("pick_updates").insert({ ...parsed.data, author_id: state.viewer.userId });
   if (error) return { values: echo(formData), error: `Could not post: ${error.message}` };
 
-  after(() => alertAdminsOfPublish(`update on ${pick?.ticker ?? "a pick"} (${parsed.data.kind})`, state.viewer.email));
+  await afterResponse(() => alertAdminsOfPublish(`update on ${pick?.ticker ?? "a pick"} (${parsed.data.kind})`, state.viewer.email));
   revalidatePath(`/admin/picks/${parsed.data.pick_id}`);
   revalidatePath(`/picks/${parsed.data.pick_id}`);
   return { ok: true, message: "Update posted." };
@@ -168,7 +168,7 @@ export async function createAnnouncement(_prev: FormState, formData: FormData): 
   const { error } = await supabase.from("announcements").insert({ ...parsed.data, author_id: state.viewer.userId });
   if (error) return { values: echo(formData), error: `Could not post: ${error.message}` };
 
-  after(() => alertAdminsOfPublish(`notice "${parsed.data.title}"`, state.viewer.email));
+  await afterResponse(() => alertAdminsOfPublish(`notice "${parsed.data.title}"`, state.viewer.email));
   revalidatePath("/announcements");
   revalidatePath("/admin/announcements");
   return { ok: true, message: "Notice posted." };
