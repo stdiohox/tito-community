@@ -1,26 +1,121 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
+/*
+ * Tito Circle. One deliberate light theme: Ivory paper, Ink type, Forest as
+ * the brand surface, Gold as the accent.
+ *
+ * Contrast rule: Gold is never text on Ivory (about 2:1). It is used for
+ * rules, icons and type on Forest or Ink. Small accent labels on Ivory use
+ * gold-deep, which clears 4.5:1.
+ */
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --font-display: var(--font-cormorant), "Cormorant Garamond", Georgia, serif;
+  --font-sans: var(--font-dm-sans), "DM Sans", system-ui, sans-serif;
+  --font-mono: var(--font-dm-mono), "DM Mono", ui-monospace, monospace;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+@theme {
+  --color-forest: #1a3a16;
+  --color-forest-700: #234b1e;
+  --color-forest-900: #10260d;
+  --color-gold: #c9a84c;
+  --color-gold-deep: #7d6320;
+  --color-gold-soft: #e9dcb4;
+  --color-ivory: #f8f5ee;
+  --color-ivory-deep: #efe9dc;
+  --color-paper: #fffdf8;
+  --color-ink: #0d0b08;
+  --color-muted: #5b564c;
+  --color-line: rgb(13 11 8 / 0.12);
+  /* Borders of interactive controls: 3.6:1 on paper (WCAG 1.4.11). */
+  --color-control: #8a857a;
+  --color-danger: #8c2f1b;
+
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-apple: cubic-bezier(0.25, 0.46, 0.45, 0.94);
+
+  --animate-rise: rise 600ms var(--ease-out-expo) both;
+
+  @keyframes rise {
+    from {
+      opacity: 0;
+      transform: translateY(12px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
   }
 }
 
+:root {
+  color-scheme: light;
+}
+
+html {
+  background: var(--color-forest);
+  -webkit-tap-highlight-color: transparent;
+  /* Keyboard focus never lands under the sticky header or the tab bar. */
+  scroll-padding-top: 5.5rem;
+  scroll-padding-bottom: 6rem;
+}
+
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--color-ivory);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  text-rendering: optimizeLegibility;
+}
+
+/* Numbers line up in every price ladder and table. */
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Staggered entrance for feed items. Pure CSS that ends visible, so nothing
+   is ever hidden when scripts are slow or off. */
+.rise {
+  animation: var(--animate-rise);
+  animation-delay: calc(var(--i, 0) * 60ms);
+}
+
+/* Forest on the light surfaces; gold only where the surface is dark, which
+   is where gold has the contrast to be seen. */
+:focus-visible {
+  outline: 2px solid var(--color-forest);
+  outline-offset: 2px;
+}
+
+.on-dark :focus-visible,
+.on-dark:focus-visible {
+  outline-color: var(--color-gold);
+}
+
+.skip-link {
+  position: absolute;
+  left: 1rem;
+  top: -4rem;
+  z-index: 60;
+  border-radius: 999px;
+  background: var(--color-gold);
+  color: var(--color-ink);
+  padding: 0.75rem 1.25rem;
+  font-weight: 600;
+  transition: top 150ms ease;
+}
+
+.skip-link:focus {
+  top: calc(env(safe-area-inset-top) + 0.75rem);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    animation-delay: 0ms !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
